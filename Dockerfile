@@ -1,41 +1,43 @@
-# syntax=docker/dockerfile:1
+FROM ghcr.io/linuxserver/unrar as unrar
 
-FROM ghcr.io/linuxserver/unrar:latest as unrar
+FROM ghcr.io/linuxserver/baseimage-alpine:edge as compile_env
+
+# remove miniupnpc-dev cause the incompatibility of function UPNP_GetValidIGD
+# transmission will use third-party compiled static library instead
+RUN echo "*** install base packages ***" \
+    && apk --no-cache add curl jq ca-certificates cmake curl-dev fmt-dev g++ gettext-dev git libevent-dev libpsl linux-headers ninja npm pkgconfig xz \
+    && echo "*** Get customized transmission ***" \
+    && git clone -b 4.0.x https://github.com/atomwh/transmission.git \
+    && cd transmission && git submodule update --init --recursive && cd .. \
+    && echo "*** Update registry of npm ***" \
+    && npm config set registry=https://registry.npmmirror.com \
+    && echo "*** Start to complie transmission ***" \
+    && cmake -S transmission -B obj -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=pfx \
+         -DENABLE_DAEMON=ON -DENABLE_UTILS=ON -DREBUILD_WEB=ON -DENABLE_TESTS=ON -DENABLE_WERROR=ON \
+         -DENABLE_GTK=OFF -DENABLE_QT=OFF -DENABLE_MAC=OFF -DRUN_CLANG_TIDY=OFF \
+    && cmake --build obj --config RelWithDebInfo \
+    && cmake -E chdir obj ctest -j $(nproc) --build-config RelWithDebInfo --output-on-failure \
+    && cmake --build obj --config RelWithDebInfo --target install/strip \
+    && echo "*** Get customized TrguiNG ***" \
+    && latest_rel="$(curl -s https://api.github.com/repos/atomwh/Trguing-cn/releases/latest | jq -r ".assets[].browser_download_url")" \
+    && curl -L "$latest_rel" -o trguing.zip \
+    && mkdir -p /trguing \
+    && unzip -d /trguing trguing.zip
 
 FROM ghcr.io/linuxserver/baseimage-alpine:edge
 
-ARG BUILD_DATE
-ARG VERSION
-ARG TRANSMISSION_VERSION
-LABEL build_version="Linuxserver.io version:- ${VERSION} Build-date:- ${BUILD_DATE}"
-LABEL maintainer="aptalca"
+LABEL maintainer="jq50n"
 
-RUN \
-  echo "**** install build packages ****" && \
-  apk add --no-cache --virtual=build-dependencies \
-    build-base && \
-  echo "**** install packages ****" && \
-  apk add --no-cache \
-    findutils \
-    p7zip \
-    python3 && \
-  echo "**** install transmission ****" && \
-  if [ -z ${TRANSMISSION_VERSION+x} ]; then \
-    TRANSMISSION_VERSION=$(curl -sL "http://dl-cdn.alpinelinux.org/alpine/edge/community/x86_64/APKINDEX.tar.gz" | tar -xz -C /tmp \
-    && awk '/^P:transmission$/,/V:/' /tmp/APKINDEX | sed -n 2p | sed 's/^V://'); \
-  fi && \
-  apk add --no-cache \
-    transmission-cli==${TRANSMISSION_VERSION} \
-    transmission-daemon==${TRANSMISSION_VERSION} \
-    transmission-extra==${TRANSMISSION_VERSION} \
-    transmission-remote==${TRANSMISSION_VERSION} && \
-  printf "Linuxserver.io version: ${VERSION}\nBuild-date: ${BUILD_DATE}" > /build_version && \
-  echo "**** cleanup ****" && \
-  apk del --purge \
-    build-dependencies && \
-  rm -rf \
-    /tmp/* \
-    $HOME/.cache
+RUN echo "*** install packages ***" \
+    && apk add --no-cache findutils p7zip python3 libevent \
+    && echo "**** cleanup ****" \
+    && rm -rf /tmp/* $HOME/.cache
+
+# add transmission
+COPY --from=compile_env pfx/ /usr
+
+# add TrguiNG
+COPY --from=compile_env /trguing /trguing
 
 # copy local files
 COPY root/ /
@@ -43,6 +45,11 @@ COPY root/ /
 # add unrar
 COPY --from=unrar /usr/bin/unrar-alpine /usr/bin/unrar
 
+ENV TRANSMISSION_WEB_HOME=/trguing \
+    TZ=Asia/Shanghai 
+
 # ports and volumes
-EXPOSE 9091 51413/tcp 51413/udp
+ENV RPCPORT=9091 \
+    PEERPORT=51413
+EXPOSE $RPCPORT $PEERPORT/tcp $PEERPORT/udp
 VOLUME /config
